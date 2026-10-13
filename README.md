@@ -89,6 +89,80 @@ When loading trusted original checkpoints with PyTorch 2.7, set
 `$env:TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = "1"` before running the scripts;
 they deserialize complete model objects using `torch.load`.
 
+### Frozen encoder feature extraction
+
+Run this launcher from Git Bash to extract the first 100 chip/month samples
+using the local checkpoint and dataset paths:
+
+```bash
+bash ./extract_features.sh
+```
+
+Or run directly in PowerShell with explicit paths:
+
+```powershell
+.\.venv\Scripts\python.exe src/extract_features.py `
+  --checkpoint "models/tf_efficientnetv2_l_in21k_f0_b8x2_e100_nrmse_devscse_attnlin_augs_decplus7_plus800eb_200ft/modelo_best.pth" `
+  --train-features-dir "E:/Datasets/Biomassters/train_features/Volumes/Samsung_T5/BIOMASS/BioMasster_Dataset/v1/DrivenData/train_features" `
+  --output-dir "E:/Datasets/Biomassters/extracted_features" `
+  --batch-size 4 --num-workers 2 --max-samples 100
+```
+
+CLI arguments override launcher defaults. Use `--max-samples 0` for all
+samples, `--batch-size 1` to reduce GPU memory use, `--num-workers 0` to load
+inputs in the main process, or `--device cpu` for CPU execution. On Linux/WSL,
+override the paths with mounted Linux paths and use a Linux virtual environment.
+Every extractor option is configurable in the launcher's configuration block
+or through environment variables: `CHECKPOINT`, `TRAIN_FEATURES_DIR`,
+`OUTPUT_DIR`, `BATCH_SIZE`, `NUM_WORKERS`, `DEVICE`, `MAX_SAMPLES`, and
+`OVERWRITE`. `PYTHON` overrides the interpreter; otherwise the launcher uses
+the local virtual environment or system `python3` (including Colab).
+`OVERWRITE=true` enables recomputation and `OVERWRITE=false` preserves resume
+behavior. For example:
+
+```bash
+BATCH_SIZE=2 NUM_WORKERS=0 MAX_SAMPLES=100 OVERWRITE=false bash ./extract_features.sh
+```
+
+The extractor loads the trusted complete checkpoint, maps its legacy timm
+class names, and strictly transfers the encoder weights into the current
+encoder. It downloads no pretrained weights. Parameters are frozen and all
+computation and saved arrays use float32, with autocast and TF32 disabled.
+Outputs precede temporal attention and decoding.
+
+Matching S1 and S2 images supply 15 normalized input bands for each chip/month.
+Missing S2 images are filled with zeros, as in training. The sample limit
+counts combined chip/month inputs, rather than individual sensor TIFFs.
+For example, `0003d2eb_S1_00.tif` and `0003d2eb_S2_00.tif` produce:
+
+| Output relative to extracted_features | Shape (channels, height, width) |
+| --- | --- |
+| `128x128/0003d2eb_00.npy` | `(32, 128, 128)` |
+| `64x64/0003d2eb_00.npy` | `(64, 64, 64)` |
+| `32x32/0003d2eb_00.npy` | `(96, 32, 32)` |
+| `16x16/0003d2eb_00.npy` | `(224, 16, 16)` |
+| `8x8/0003d2eb_00.npy` | `(640, 8, 8)` |
+
+```python
+import numpy as np
+features = np.load(
+    "E:/Datasets/Biomassters/extracted_features/128x128/0003d2eb_00.npy",
+    allow_pickle=False,
+)
+```
+
+The manifest records the checkpoint SHA-256, source directory, normalization,
+precision, and output shapes. Rerunning skips samples with five valid arrays;
+incomplete samples are recomputed. Use `--overwrite` to recompute the selected
+samples. A mismatched manifest is rejected even with `--overwrite`; choose a
+separate directory for a different checkpoint or extraction configuration.
+Keep the input TIFFs unchanged when resuming into an existing output directory.
+
+The 100-sample test writes 500 arrays totaling about 375 MiB. The full 104,268
+samples require about 382 GiB, plus file overhead. Free disk space is checked
+before inference; the full run requires more space than the current E: drive
+has available.
+
 ### Training
 
 To run training from the command line
