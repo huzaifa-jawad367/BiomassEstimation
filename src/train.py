@@ -30,6 +30,7 @@ from sklearn.model_selection import KFold
 
 import models
 import dataset
+import feature_dataset
 
 
 def parse_args(args=None):
@@ -46,6 +47,10 @@ def parse_args(args=None):
         help="path to train df",
         default="./data/train_features",
     )
+    parser.add_argument("--feature-mode", "--feature_mode", action="store_true",
+                        help="Train attention and decoder using cached features; skip the image encoder")
+    parser.add_argument("--train-features-dir", type=str, default=None,
+                        help="Extracted feature directory containing manifest.json and five resolution folders")
     parser.add_argument(
         "--train-labels-dir",
         type=str,
@@ -143,6 +148,13 @@ def parse_args(args=None):
     parser.add_argument("--ft", action="store_true", help="finetune")
 
     args = parser.parse_args(args=args)
+    if args.feature_mode and not args.train_features_dir:
+        parser.error("--feature-mode requires --train-features-dir")
+    if args.feature_mode and (list(args.img_size) != [256, 256]
+                              or args.in_channels != 15 or args.out_indices != [0, 1, 2, 3, 4]):
+        parser.error("Feature mode requires 256x256, 15-band inputs and all five output scales")
+    if args.batch_size < 1 or args.num_workers < 0:
+        parser.error("--batch-size must be positive and --num-workers nonnegative")
 
     return args
 
@@ -164,6 +176,12 @@ def notify(title, summary, value=-1, server="sun"):
         pass
 
 
+def inputs_to_cuda(inputs, local_rank):
+    if isinstance(inputs, torch.Tensor):
+        return inputs.cuda(local_rank, non_blocking=True)
+    return [inputs_to_cuda(value, local_rank) for value in inputs]
+
+
 def epoch_step_train(loader, desc, model, criterion, optimizer, scaler, fp16=False, grad_accum=1, local_rank=0):
     model.train()
 
@@ -172,7 +190,7 @@ def epoch_step_train(loader, desc, model, criterion, optimizer, scaler, fp16=Fal
 
     loc_loss = n = 0
     for images, mask, target in loader:
-        images = images.cuda(local_rank, non_blocking=True)
+        images = inputs_to_cuda(images, local_rank)
         mask = mask.cuda(local_rank, non_blocking=True)
         target = target.cuda(local_rank, non_blocking=True)
 
@@ -219,14 +237,16 @@ def epoch_step_train(loader, desc, model, criterion, optimizer, scaler, fp16=Fal
 @torch.no_grad()
 def epoch_step_val(loader, desc, model, criterion, local_rank=0):
     model.eval()
+    module = model.module if hasattr(model, "module") else model
+    feature_mode = getattr(module, "feature_mode", False)
 
     if local_rank == 0:
         pbar = tqdm.tqdm(total=len(loader), desc=desc, leave=False, mininterval=2)
 
     loc_loss = n = 0
-    loc_loss_tta = {f"tta_{i}": 0 for i in range(1, 4 + 1)}
+    loc_loss_tta = {f"tta_{i}": 0 for i in range(1, 2 if feature_mode else 5)}
     for images, mask, target in loader:
-        images = images.cuda(local_rank, non_blocking=True)
+        images = inputs_to_cuda(images, local_rank)
         mask = mask.cuda(local_rank, non_blocking=True)
         target = target.cuda(local_rank, non_blocking=True)
 
@@ -237,17 +257,18 @@ def epoch_step_val(loader, desc, model, criterion, local_rank=0):
         loc_loss += loss.item() * bs
         loc_loss_tta["tta_1"] += loss.item() * bs
 
-        logits += torch.flip(model(torch.flip(images, dims=[-1]), mask), dims=[-1])
-        loss = criterion(logits / 2, target)
-        loc_loss_tta["tta_2"] += loss.item() * bs
+        if not feature_mode:
+            logits += torch.flip(model(torch.flip(images, dims=[-1]), mask), dims=[-1])
+            loss = criterion(logits / 2, target)
+            loc_loss_tta["tta_2"] += loss.item() * bs
 
-        logits += torch.flip(model(torch.flip(images, dims=[-2]), mask), dims=[-2])
-        loss = criterion(logits / 3, target)
-        loc_loss_tta["tta_3"] += loss.item() * bs
+            logits += torch.flip(model(torch.flip(images, dims=[-2]), mask), dims=[-2])
+            loss = criterion(logits / 3, target)
+            loc_loss_tta["tta_3"] += loss.item() * bs
 
-        logits += torch.flip(model(torch.flip(images, dims=[-2, -1]), mask), dims=[-2, -1])
-        loss = criterion(logits / 4, target)
-        loc_loss_tta["tta_4"] += loss.item() * bs
+            logits += torch.flip(model(torch.flip(images, dims=[-2, -1]), mask), dims=[-2, -1])
+            loss = criterion(logits / 4, target)
+            loc_loss_tta["tta_4"] += loss.item() * bs
 
         torch.cuda.synchronize()
 
@@ -521,23 +542,7 @@ def train(args):
     model = build_model(args)
     model = model.cuda(local_rank)
 
-    checkpoint = None
-    if args.load:
-        path_to_resume = Path(args.load).expanduser()
-        if path_to_resume.is_file():
-            print(f"=> loading resume checkpoint '{path_to_resume}'")
-            checkpoint = torch.load(
-                path_to_resume,
-                map_location="cpu",
-            )
-
-            nn.modules.utils.consume_prefix_in_state_dict_if_present(checkpoint["state_dict"], "module.")
-            model.load_state_dict(checkpoint["state_dict"])
-            print(
-                f"=> resume from checkpoint '{path_to_resume}' (epoch {checkpoint['epoch']})"
-            )
-        else:
-            print(f"=> no checkpoint found at '{path_to_resume}'")
+    checkpoint = load_training_checkpoint(model, args) if args.load else None
 
     model = model.to(memory_format=torch.channels_last)
 
@@ -579,28 +584,7 @@ def train(args):
         print(train_df)
         print(dev_df)
 
-    train_images_dir = Path(args.train_images_dir)
-    train_labels_dir = Path(args.train_labels_dir)
-    train_dataset = dataset.DS(
-        df=train_df,
-        dir_features=train_images_dir,
-        dir_labels=train_labels_dir,
-        augs=args.augs,
-    )
-
-    if args.test_df is not None:
-        test_dataset =dataset.DS(
-            df=test_df,
-            dir_features=train_images_dir,
-            dir_labels=train_labels_dir,
-        )
-        train_dataset = torch.utils.data.ConcatDataset([train_dataset, test_dataset])
-
-    val_dataset = dataset.DS(
-        df=dev_df,
-        dir_features=train_images_dir,
-        dir_labels=train_labels_dir,
-    )
+    train_dataset, val_dataset = build_datasets(train_df, dev_df, test_df, args)
 
     train_sampler = None
     val_sampler = None
@@ -608,7 +592,8 @@ def train(args):
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
         val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
 
-    args.num_workers = min(args.batch_size, 2)
+    if not args.feature_mode:
+        args.num_workers = min(args.batch_size, 2)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -617,7 +602,7 @@ def train(args):
         collate_fn=None,
         num_workers=args.num_workers,
         pin_memory=False,
-        persistent_workers=True,
+        persistent_workers=args.num_workers > 0,
         drop_last=True,
     )
     val_batch_size = args.batch_size
@@ -629,7 +614,7 @@ def train(args):
         collate_fn=None,
         num_workers=args.num_workers,
         pin_memory=False,
-        persistent_workers=True,
+        persistent_workers=args.num_workers > 0,
         drop_last=False,
     )
 
@@ -754,9 +739,71 @@ def train(args):
 
 
 def build_model(args):
+    if args.feature_mode:
+        args.feature_manifest = feature_dataset.load_feature_manifest(args.train_features_dir)
+        args.feature_channels = [shape[0] for _, shape in feature_dataset.ordered_shapes(args.feature_manifest)]
+        args.backbone = args.feature_manifest["backbone"]
     model = models.UnetVFLOW(args)
 
     return model
+
+
+def build_datasets(train_df, dev_df, test_df, args):
+    cls = feature_dataset.FeatureDS if args.feature_mode else dataset.DS
+    directory = Path(args.train_features_dir if args.feature_mode else args.train_images_dir)
+    options = {}
+    if args.feature_mode:
+        manifest = feature_dataset.load_feature_manifest(directory)
+        chips = set(train_df.chip_id) | set(dev_df.chip_id)
+        if args.test_df is not None:
+            chips |= set(test_df.chip_id)
+            test_df = test_df.groupby("chip_id").agg(list).reset_index()
+        feature_dataset.validate_feature_coverage(directory, chips, manifest)
+        options["manifest"] = manifest
+        if args.augs:
+            print("Feature mode: --augs applies month dropout only; spatial augmentation and image TTA are disabled.")
+    labels = Path(args.train_labels_dir)
+    training = cls(train_df, directory, labels, augs=args.augs, **options)
+    validation = cls(dev_df, directory, labels, **options)
+    if args.test_df is not None:
+        extra = cls(test_df, directory, labels, **options)
+        training = torch.utils.data.ConcatDataset([training, extra])
+    return training, validation
+
+
+def load_training_checkpoint(model, args):
+    from extract_features import legacy_timm_aliases
+
+    path = Path(args.load).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Checkpoint not found: {path}")
+    with legacy_timm_aliases():
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(checkpoint, nn.Module):
+        if args.resume:
+            raise ValueError("--resume requires model_best.pth/model_last.pth with optimizer state")
+        state = checkpoint.state_dict()
+        checkpoint = None
+    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state = checkpoint["state_dict"]
+        if args.resume:
+            saved_args = checkpoint.get("args")
+            if getattr(saved_args, "feature_mode", False) != args.feature_mode:
+                raise ValueError("Cannot resume between image and feature training modes; use --load without --resume")
+            if args.feature_mode:
+                saved = getattr(saved_args, "feature_manifest", None)
+                # Source paths can change when moving the cache to Colab; its encoder and format cannot.
+                identity = lambda manifest: {k: v for k, v in manifest.items() if k != "input_directory"}
+                if saved is None or identity(saved) != identity(args.feature_manifest):
+                    raise ValueError("Cannot resume with a different encoder feature manifest")
+    else:
+        raise ValueError(f"Unsupported training checkpoint: {path}")
+    nn.modules.utils.consume_prefix_in_state_dict_if_present(state, "module.")
+    if args.feature_mode:
+        state = {key: value for key, value in state.items() if not key.startswith("encoder.")}
+    model.load_state_dict(state, strict=True)
+    print(f"Loaded {'feature' if args.feature_mode else 'image'} training weights from {path}")
+    return checkpoint
 
 
 def build_criterion(args):

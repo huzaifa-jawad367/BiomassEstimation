@@ -165,6 +165,48 @@ has available.
 
 ### Training
 
+`src/train.py` accepts raw images by default. Add `--feature-mode` to train
+directly from the cached encoder features:
+
+```bash
+python src/train.py \
+  --feature-mode \
+  --train-features-dir /content/drive/MyDrive/Biomassters/extracted_features \
+  --train-df /content/drive/MyDrive/Biomassters/The_BioMassters_-_features_metadata.csv.csv \
+  --train-labels-dir /content/drive/MyDrive/Biomassters/train_agbm \
+  --checkpoint-dir ./models/features_run \
+  --batch-size 1 --num-workers 2 --num-epochs 100 --augs
+```
+
+Point the labels argument to the folder directly containing `chip_agbm.tif`.
+Each metadata chip needs all 12 months at all five cached scales. The
+100-sample extraction preview contains only eight fully extracted chips;
+finish extraction for normal training, or supply metadata limited to those
+complete chips and reduce `--n-folds` for a small smoke test.
+
+Feature mode constructs no EfficientNet encoder and downloads no encoder
+weights. It trains temporal attention, the decoder, and the prediction head
+using the existing optimizer, losses, and fold split. `--augs` uses month
+dropout only; spatial augmentation and image-flip validation TTA are disabled.
+Feature mode honors `--num-workers`, including zero. Backbone identity and
+encoder channel counts come from `manifest.json`.
+
+By default the attention and decoder are freshly initialized. To initialize
+them from the original winning checkpoint, append:
+
+```bash
+--load ./models/tf_efficientnetv2_l_in21k_f0_b8x2_e100_nrmse_devscse_attnlin_augs_decplus7_plus800eb_200ft/modelo_best.pth \
+--dec-channels 384 368 352 336 320 --dec-attn-type scse
+```
+
+Complete model checkpoints and training state checkpoints are accepted by
+`--load`. Feature mode ignores image encoder weights and strictly loads all
+attention/decoder/head weights, so decoder settings must match the checkpoint.
+Use `--load .../model_last.pth --resume` to resume a feature run including
+optimizer and scheduler state. Resuming requires the same feature manifest
+(source paths may change) and training mode. Feature-mode checkpoints contain
+no image encoder and are intended for cached-feature inputs.
+
 To run training from the command line
 
 ```bash

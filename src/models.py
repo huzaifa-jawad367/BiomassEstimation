@@ -81,20 +81,26 @@ class UnetVFLOW(nn.Module):
 
         encoder_name = args.backbone
 
-        self.encoder = TimmEncoder(args)
+        self.feature_mode = getattr(args, "feature_mode", False)
+        if self.feature_mode:
+            self.encoder = None
+            encoder_channels = [args.in_channels] + list(args.feature_channels)
+        else:
+            self.encoder = TimmEncoder(args)
+            encoder_channels = self.encoder.out_channels
 
-        encoder_depth = len(self.encoder.out_channels) - 1
+        encoder_depth = len(encoder_channels) - 1
 
         self.attn = nn.ModuleList(
             [
                 AttentionPooling(i)
-                for i in self.encoder.out_channels[1:]
+                for i in encoder_channels[1:]
             ]
         )
 
         decoder_channels = args.dec_channels[:encoder_depth]
         self.decoder = UnetDecoder(
-            encoder_channels=self.encoder.out_channels,
+            encoder_channels=encoder_channels,
             decoder_channels=decoder_channels,
             n_blocks=encoder_depth,
             use_batchnorm=decoder_use_batchnorm,
@@ -111,13 +117,34 @@ class UnetVFLOW(nn.Module):
         init.initialize_head(self.segmentation_head)
 
     def forward(self, x, mask):
-        """Sequentially pass `x` trough model`s encoder, decoder and heads"""
+        """Accept images, or five monthly feature tensors in feature mode."""
+
+        if getattr(self, "feature_mode", False):
+            return self.forward_features(x, mask)
 
         bs, _, d, h, w = x.size()
         x = x.view(-1, d, h, w)
         x = x.to(memory_format=torch.channels_last)
         features = self.encoder(x)
 
+        return self._decode_features(features, bs, mask)
+
+    def forward_features(self, features, mask):
+        """Pool [B,T,C,H,W] cached features, then decode the annual prediction."""
+        if not isinstance(features, (list, tuple)) or len(features) != len(self.attn):
+            raise ValueError(f"Expected {len(self.attn)} cached feature tensors")
+        if mask.ndim != 2 or mask.dtype != torch.bool or mask.all(dim=1).any():
+            raise ValueError("Expected boolean [batch, months] mask with at least one available month")
+        bs, months = mask.shape
+        flattened = []
+        for feature, attention in zip(features, self.attn):
+            channels = attention.attn[0].in_features
+            if feature.ndim != 5 or feature.shape[:3] != (bs, months, channels):
+                raise ValueError(f"Invalid cached feature shape {tuple(feature.shape)}")
+            flattened.append(feature.reshape(bs * months, *feature.shape[2:]))
+        return self._decode_features(flattened, bs, mask)
+
+    def _decode_features(self, features, bs, mask):
         features = [None] + [
             attn(f, bs, mask)[0]
             for f, attn in zip(features, self.attn)
