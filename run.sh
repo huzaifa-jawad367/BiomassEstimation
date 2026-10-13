@@ -3,7 +3,7 @@
 
 set -eu  # o pipefail
 
-GPU=${GPU:-0,1}
+GPU=${GPU:-0}
 PORT=${PORT:-29500}
 N_GPUS=${N_GPUS:-1} # change to your number of GPUs
 
@@ -22,7 +22,7 @@ data_dir=./data
 chkps_dir=./models
 
 backbone=tf_efficientnetv2_l_in21k
-BS=8
+BS=2
 FOLD=0
 
 CHECKPOINT=$chkps_dir/"${backbone}"_f"${FOLD}"_b"${BS}"x"${N_GPUS}"_e"${N_EPOCHS}"_"${loss}"_devscse_attnlin_augs_decplus7

@@ -60,6 +60,35 @@ pip install -r requirements.txt
 
 Download the data from the competition page and unzip into `data` folder.
 
+### Windows / RTX 50-series setup
+
+Use the local `.venv` environment with Python 3.11 and CUDA 12.8 PyTorch.
+The original PyTorch 1.13 build does not support RTX 50-series GPUs. The
+Windows requirements retain the older timm and segmentation-models-pytorch
+APIs used by this solution.
+
+```powershell
+uv venv --python 3.11 .venv
+uv pip install --python .venv/Scripts/python.exe torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python .venv/Scripts/python.exe -r requirements-windows.txt
+.\.venv\Scripts\Activate.ps1
+```
+
+Alternatively, invoke `.\.venv\Scripts\python.exe` directly without activation.
+Select `.venv\Scripts\python.exe` as your editor's Python interpreter.
+Run `python src/train.py --help` or `python src/submit.py --help` to inspect
+the available options. The `.sh` launchers require a Unix shell, and multi-GPU
+training uses NCCL, which requires Linux/WSL2. For native Windows, invoke the
+Python scripts directly for a single GPU and use a smaller batch size than
+the original A100 settings.
+
+The tracked `data` and `models` entries are placeholder files containing the
+author's Linux paths, not datasets or checkpoints. Download those separately
+and pass their actual directories using the scripts' command-line options.
+When loading trusted original checkpoints with PyTorch 2.7, set
+`$env:TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD = "1"` before running the scripts;
+they deserialize complete model objects using `torch.load`.
+
 ### Training
 
 To run training from the command line
