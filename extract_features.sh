@@ -3,17 +3,22 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# Configuration: edit these defaults or set the corresponding environment variables.
-# For Colab/WSL, replace the E:/ paths with your mounted Linux dataset paths.
-CHECKPOINT="${CHECKPOINT:-$ROOT/models/tf_efficientnetv2_l_in21k_f0_b8x2_e100_nrmse_devscse_attnlin_augs_decplus7_plus800eb_200ft/modelo_best.pth}"
-TRAIN_FEATURES_DIR="${TRAIN_FEATURES_DIR:-E:/Datasets/Biomassters/train_features/Volumes/Samsung_T5/BIOMASS/BioMasster_Dataset/v1/DrivenData/train_features}"
-# Resume into the extracted_features directory beside this repository.
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/../extracted_features}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
+# Colab configuration: all values can be overridden through environment variables.
+CHECKPOINT="${CHECKPOINT:-/content/modelo_best.pth}"
+TRAIN_FEATURES_DIR="${TRAIN_FEATURES_DIR:-/content/drive/MyDrive/projects/Biomass/Biomassters/train_features/Volumes/Samsung_T5/BIOMASS/BioMasster_Dataset/v1/DrivenData/train_features}"
+OUTPUT_DIR="${OUTPUT_DIR:-/content/drive/MyDrive/projects/Biomass/Biomassters/extracted_features}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 DEVICE="${DEVICE:-cuda}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}" # 0 extracts all samples.
 OVERWRITE="${OVERWRITE:-false}" # true recomputes selected samples.
+ALLOW_SOURCE_RELOCATION="${ALLOW_SOURCE_RELOCATION:-true}" # Same TIFFs, different machine/path.
+# Drive's mounted free-space report is not a reliable Google account quota check.
+if [[ "$OUTPUT_DIR" == /content/drive/* ]]; then
+    SKIP_DISK_SPACE_CHECK="${SKIP_DISK_SPACE_CHECK:-true}"
+else
+    SKIP_DISK_SPACE_CHECK="${SKIP_DISK_SPACE_CHECK:-false}"
+fi
 PYTHON="${PYTHON:-}" # Empty selects a local .venv or system python3.
 
 if [[ -n "${PYTHON:-}" ]]; then
@@ -38,11 +43,17 @@ ARGS=(
     --device "$DEVICE"
     --max-samples "$MAX_SAMPLES"
 )
-case "${OVERWRITE,,}" in
-    true|1|yes|on) ARGS+=(--overwrite) ;;
-    false|0|no|off) ;;
-    *) echo "OVERWRITE must be true or false (also accepts 1/0, yes/no, on/off)." >&2; exit 1 ;;
-esac
+add_boolean_flag() {
+    local value="${!1}"
+    case "${value,,}" in
+        true|1|yes|on) ARGS+=("$2") ;;
+        false|0|no|off) ;;
+        *) echo "$1 must be true or false (also accepts 1/0, yes/no, on/off)." >&2; exit 1 ;;
+    esac
+}
+add_boolean_flag OVERWRITE --overwrite
+add_boolean_flag ALLOW_SOURCE_RELOCATION --allow-source-relocation
+add_boolean_flag SKIP_DISK_SPACE_CHECK --skip-disk-space-check
 
 # Explicit scalar CLI arguments override the configuration above.
 exec "$PYTHON_BIN" -u "$ROOT/src/extract_features.py" "${ARGS[@]}" "$@"

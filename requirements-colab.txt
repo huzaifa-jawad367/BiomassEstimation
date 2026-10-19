@@ -1,0 +1,9 @@
+# Keep the CUDA-enabled torch/torchvision already installed in the Colab runtime.
+# Do not use requirements.txt or requirements-windows.txt for Colab extraction.
+# NumPy 2 supports newer Colab Python versions; do not force an old NumPy wheel.
+numpy>=1.26.4,<3
+opencv-python-headless>=4.10,<5
+scikit-image>=0.25,<1
+segmentation-models-pytorch==0.3.3
+timm==0.9.2
+tqdm>=4.67,<5

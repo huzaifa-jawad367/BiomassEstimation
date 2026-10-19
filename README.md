@@ -91,11 +91,77 @@ they deserialize complete model objects using `torch.load`.
 
 ### Frozen encoder feature extraction
 
+#### Google Colab (`colab-feature-extraction` branch)
+
+Enable a GPU runtime, mount Drive, and fetch the branch. This cell works for
+both a fresh clone and an existing clean checkout; it never resets local edits:
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+```
+
+```bash
+%%bash
+set -euo pipefail
+if [[ ! -d /content/BiomassEstimation/.git ]]; then
+  git clone --branch colab-feature-extraction https://github.com/huzaifa-jawad367/BiomassEstimation.git /content/BiomassEstimation
+else
+  cd /content/BiomassEstimation
+  git fetch origin colab-feature-extraction
+  git switch colab-feature-extraction
+  git pull --ff-only origin colab-feature-extraction
+fi
+```
+
+Install extraction dependencies while keeping Colab's CUDA-enabled PyTorch
+and torchvision. Do not install the original `requirements.txt` or the
+Windows requirements in Colab. If pip requests a runtime restart after
+changing already imported libraries, restart before extracting:
+
+```python
+%pip install -r /content/BiomassEstimation/requirements-colab.txt
+```
+
+Place the trusted checkpoint at `/content/modelo_best.pth`, then run:
+
+```python
+!CHECKPOINT="/content/modelo_best.pth" \
+TRAIN_FEATURES_DIR="/content/drive/MyDrive/projects/Biomass/Biomassters/train_features/Volumes/Samsung_T5/BIOMASS/BioMasster_Dataset/v1/DrivenData/train_features" \
+OUTPUT_DIR="/content/drive/MyDrive/projects/Biomass/Biomassters/extracted_features" \
+MAX_SAMPLES=0 BATCH_SIZE=8 \
+bash /content/BiomassEstimation/extract_features.sh
+```
+
+Those paths, batch size 8, all samples, and `OVERWRITE=false` are the launcher
+defaults on this branch. All settings remain configurable. Use `MAX_SAMPLES=100`
+for a preview or `NUM_WORKERS=0` for loading inputs in the main process.
+
+The launcher enables `ALLOW_SOURCE_RELOCATION=true` to resume a cache copied
+from Windows. Only the recorded input path may differ; checkpoint SHA-256,
+normalization, dtype, and shapes must still match. This assumes the source
+TIFFs are unchanged. Set this variable to `false` for strict input-path checks.
+
+For `/content/drive/...` outputs, the launcher defaults
+`SKIP_DISK_SPACE_CHECK=true`: a mounted Drive's filesystem free-space report
+is not a reliable Google account quota check. Check your Drive account's
+remaining storage yourself (approximately 382 GiB for a fresh full cache).
+Set `SKIP_DISK_SPACE_CHECK=false` to enforce the filesystem preflight. Outputs
+elsewhere default to checking disk space. Quota/Drive I/O errors still stop
+extraction; already completed samples can be skipped on the next run.
+
+Resume reads only NPY headers and file sizes, with no memory mapping or full
+tensor reads. The five resolution folders and per-chip/month filenames are
+unchanged. Large numbers of Drive files can still make scanning and extraction
+slow; this branch does not copy the dataset to the temporary Colab disk.
+
+#### Local execution
+
 Run this launcher from Git Bash to extract the first 100 chip/month samples
 using the local checkpoint and dataset paths:
 
 ```bash
-bash ./extract_features.sh
+bash ./extract_features.sh --max-samples 100
 ```
 
 Or run directly in PowerShell with explicit paths:

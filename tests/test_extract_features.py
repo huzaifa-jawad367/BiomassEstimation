@@ -82,6 +82,43 @@ class ExtractionTests(unittest.TestCase):
         np.save(self.root / "8x8" / "chip_00.npy", features[-1].astype(np.float16))
         self.assertFalse(extraction.valid_sample(self.root, "chip_00"))
 
+    def test_resume_uses_headers_without_numpy_load_or_mmap(self):
+        features = [np.zeros(shape, dtype=np.float32) for shape in extraction.SCALES.values()]
+        for scale in extraction.SCALES:
+            (self.root / scale).mkdir()
+        extraction.save_sample(self.root, "chip_00", features)
+        with patch.object(np, "load", side_effect=AssertionError("must not load or mmap remote arrays")):
+            self.assertTrue(extraction.valid_sample(self.root, "chip_00"))
+        path = self.root / "8x8" / "chip_00.npy"
+        with path.open("r+b") as handle:
+            handle.truncate(256)
+        self.assertFalse(extraction.valid_sample(self.root, "chip_00"))
+
+    def test_source_relocation_requires_opt_in_and_preserves_encoder_identity(self):
+        original = {"checkpoint_sha256": "abc", "input_directory": "E:/original", "dtype": "float32"}
+        relocated = dict(original, input_directory="/content/drive/MyDrive/inputs")
+        (self.root / "manifest.json").write_text(json.dumps(original))
+        with self.assertRaisesRegex(ValueError, "allow-source-relocation"):
+            extraction.validate_manifest(self.root, relocated)
+        with patch("builtins.print"):
+            extraction.validate_manifest(self.root, relocated, allow_source_relocation=True)
+        with self.assertRaisesRegex(ValueError, "Incompatible manifest"):
+            extraction.validate_manifest(self.root, dict(relocated, checkpoint_sha256="other"), True)
+
+    def test_remote_preflight_can_be_skipped_without_checking_local_volume(self):
+        checkpoint = self.root / "model.pth"
+        checkpoint.touch()
+        (self.root / "chip_S1_00.tif").touch()
+        with patch.object(extraction, "validate_manifest"), \
+                patch.object(extraction, "make_manifest", return_value={}), \
+                patch.object(extraction, "existing_sample_ids", return_value=set()), \
+                patch.object(extraction, "load_encoder", side_effect=RuntimeError("reached encoder without local quota check")), \
+                patch.object(extraction, "check_disk_space", side_effect=AssertionError("local space is not remote quota")), \
+                patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "reached encoder"):
+                extraction.main(["--checkpoint", str(checkpoint), "--train-features-dir", str(self.root),
+                                 "--output-dir", str(self.root / "output"), "--device", "cpu", "--skip-disk-space-check"])
+
     def test_manifest_mismatch_and_untracked_outputs_are_rejected(self):
         manifest = {"checkpoint_sha256": "abc", "dtype": "float32"}
         (self.root / "manifest.json").write_text(json.dumps(manifest))

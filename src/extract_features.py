@@ -160,18 +160,26 @@ def make_manifest(checkpoint, directory):
     }
 
 
-def validate_manifest(output_dir, expected):
+def validate_manifest(output_dir, expected, allow_source_relocation=False):
     path = output_dir / "manifest.json"
     if path.exists():
         try:
             actual = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, OSError) as exc:
             raise ValueError(f"Cannot read {path}: {exc}") from exc
-        if actual != expected:
+        if allow_source_relocation and isinstance(actual, dict):
+            identity = lambda manifest: {key: value for key, value in manifest.items() if key != "input_directory"}
+            compatible = identity(actual) == identity(expected)
+        else:
+            compatible = actual == expected
+        if not compatible:
             raise ValueError(
                 f"Incompatible manifest in {output_dir}; use a separate output directory. "
-                "--overwrite does not permit mixing extraction settings."
+                "--overwrite does not permit mixing extraction settings. If only the "
+                "input path changed for the same TIFFs, use --allow-source-relocation."
             )
+        if actual.get("input_directory") != expected.get("input_directory"):
+            print(f"Resuming relocated source: {actual.get('input_directory')} -> {expected.get('input_directory')}", flush=True)
     elif output_dir.exists() and any(output_dir.rglob("*.npy")):
         raise ValueError(f"Existing NPY files in {output_dir} have no manifest")
 
@@ -180,10 +188,21 @@ def valid_sample(output_dir, sample_id):
     for scale, shape in SCALES.items():
         path = output_dir / scale / f"{sample_id}.npy"
         try:
-            array = np.load(path, mmap_mode="r", allow_pickle=False)
-            if array.shape != shape or array.dtype != np.dtype(np.float32):
-                return False
-            del array
+            # Read only the NPY header and file size. Some Drive/FUSE mounts do
+            # not support mmap; loading entire arrays would waste remote reads.
+            with path.open("rb") as handle:
+                version = np.lib.format.read_magic(handle)
+                if version == (1, 0):
+                    actual_shape, fortran, dtype = np.lib.format.read_array_header_1_0(handle)
+                elif version == (2, 0):
+                    actual_shape, fortran, dtype = np.lib.format.read_array_header_2_0(handle)
+                else:
+                    return False
+                if actual_shape != shape or dtype != np.dtype(np.float32):
+                    return False
+                expected_size = handle.tell() + int(np.prod(shape)) * dtype.itemsize
+                if os.fstat(handle.fileno()).st_size != expected_size:
+                    return False
         except (OSError, ValueError, EOFError):
             return False
     return True
@@ -303,6 +322,10 @@ def parse_args(argv=None):
     parser.add_argument("--device", default="cuda", help="cuda, cuda:0, or cpu")
     parser.add_argument("--max-samples", type=int, default=100, help="Chip/month samples; 0 means all")
     parser.add_argument("--overwrite", action="store_true", help="Recompute selected samples with matching manifest")
+    parser.add_argument("--allow-source-relocation", action="store_true",
+                        help="Resume the same dataset after its input path changes; all other manifest fields must match")
+    parser.add_argument("--skip-disk-space-check", action="store_true",
+                        help="Skip local free-space preflight for remote mounts; verify remote storage quota yourself")
     args = parser.parse_args(argv)
     if args.batch_size < 1 or args.num_workers < 0 or args.max_samples < 0:
         parser.error("batch size must be positive; workers and max samples must be nonnegative")
@@ -322,15 +345,22 @@ def main(argv=None):
         raise ValueError(f"Output path is not a directory: {output_dir}")
     samples = discover_samples(directory, args.max_samples)
     manifest = make_manifest(checkpoint, directory)
-    validate_manifest(output_dir, manifest)
+    validate_manifest(output_dir, manifest, args.allow_source_relocation)
     existing = existing_sample_ids(output_dir) if not args.overwrite else set()
     pending = samples if args.overwrite else [
         sample for sample in tqdm(samples, desc="Checking outputs")
         if sample[0] not in existing or not valid_sample(output_dir, sample[0])
     ]
-    required, free = check_disk_space(output_dir, len(pending))
+    if args.skip_disk_space_check:
+        required, free = len(pending) * allocated_sample_bytes(1), None
+    else:
+        required, free = check_disk_space(output_dir, len(pending))
     print(f"Selected {len(samples):,}; skipped {len(samples)-len(pending):,}; remaining {len(pending):,}", flush=True)
-    print(f"Required {required/2**30:.2f} GiB; available {free/2**30:.2f} GiB", flush=True)
+    if free is None:
+        print(f"Remaining NPY file contents: {required/2**30:.2f} GiB. "
+              "Free-space preflight skipped; ensure your remote account has enough quota.", flush=True)
+    else:
+        print(f"Required {required/2**30:.2f} GiB; available {free/2**30:.2f} GiB", flush=True)
     if not pending:
         print("All selected samples are complete.", flush=True)
         return
