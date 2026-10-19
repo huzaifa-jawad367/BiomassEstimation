@@ -38,6 +38,7 @@ def copy_verified(source, target):
     atomic_write(target, writer)
     if checkpoint_sha256(target) != digest.hexdigest():
         raise OSError(f"Copied file failed SHA-256 verification: {target}")
+    return digest.hexdigest()
 
 
 def merge_shard(source, output, remove_source=False):

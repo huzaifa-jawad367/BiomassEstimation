@@ -339,6 +339,8 @@ def parse_args(argv=None):
     parser.add_argument("--shard-id", type=int, default=1, help="One-based shard number (1, 2, 3 for three shards)")
     parser.add_argument("--resume-dir", type=Path, default=None,
                         help="Also skip complete samples in this compatible cache, e.g. previously merged Drive outputs")
+    parser.add_argument("--sample-list", type=Path, default=None,
+                        help="JSON list of chip/month IDs to extract from a prepared local input directory")
     parser.add_argument("--overwrite", action="store_true", help="Recompute selected samples with matching manifest")
     parser.add_argument("--allow-source-relocation", action="store_true",
                         help="Resume the same dataset after its input path changes; all other manifest fields must match")
@@ -365,6 +367,17 @@ def main(argv=None):
         raise ValueError(f"Output path is not a directory: {output_dir}")
     all_samples = discover_samples(directory, 0)
     samples = select_shard(all_samples, args.num_shards, args.shard_id)
+    if args.sample_list is not None:
+        requested = json.loads(args.sample_list.read_text(encoding="utf-8"))
+        if (not isinstance(requested, list) or not all(isinstance(value, str) for value in requested)
+                or len(set(requested)) != len(requested)):
+            raise ValueError("--sample-list must contain a JSON list of unique sample ID strings")
+        available = {sample_id for sample_id, _ in samples}
+        missing = set(requested) - available
+        if missing:
+            raise ValueError(f"Prepared inputs missing sample IDs: {sorted(missing)[:5]}")
+        selected = set(requested)
+        samples = [sample for sample in samples if sample[0] in selected]
     if args.max_samples:
         samples = samples[:args.max_samples]
     if args.num_shards > 1:
