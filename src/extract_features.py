@@ -50,6 +50,20 @@ def discover_samples(directory, limit=100):
     return samples[:limit] if limit else samples
 
 
+def select_shard(samples, num_shards=1, shard_id=1):
+    """Partition sorted chip IDs into balanced, disjoint, one-based shards."""
+    if num_shards < 1 or not 1 <= shard_id <= num_shards:
+        raise ValueError("Require --num-shards >= 1 and 1 <= --shard-id <= --num-shards")
+    chips = sorted({sample_id.rsplit("_", 1)[0] for sample_id, _ in samples})
+    if num_shards > len(chips):
+        raise ValueError(f"Cannot divide {len(chips)} chips into {num_shards} nonempty shards")
+    size, extra = divmod(len(chips), num_shards)
+    start = (shard_id - 1) * size + min(shard_id - 1, extra)
+    stop = start + size + (shard_id <= extra)
+    selected = set(chips[start:stop])
+    return [sample for sample in samples if sample[0].rsplit("_", 1)[0] in selected]
+
+
 def read_image(path, channels):
     try:
         image = io.imread(path)
@@ -321,6 +335,10 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="cuda", help="cuda, cuda:0, or cpu")
     parser.add_argument("--max-samples", type=int, default=100, help="Chip/month samples; 0 means all")
+    parser.add_argument("--num-shards", type=int, default=1, help="Partition the dataset by chip; default: no sharding")
+    parser.add_argument("--shard-id", type=int, default=1, help="One-based shard number (1, 2, 3 for three shards)")
+    parser.add_argument("--resume-dir", type=Path, default=None,
+                        help="Also skip complete samples in this compatible cache, e.g. previously merged Drive outputs")
     parser.add_argument("--overwrite", action="store_true", help="Recompute selected samples with matching manifest")
     parser.add_argument("--allow-source-relocation", action="store_true",
                         help="Resume the same dataset after its input path changes; all other manifest fields must match")
@@ -329,6 +347,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.batch_size < 1 or args.num_workers < 0 or args.max_samples < 0:
         parser.error("batch size must be positive; workers and max samples must be nonnegative")
+    if args.num_shards < 1 or not 1 <= args.shard_id <= args.num_shards:
+        parser.error("Require --num-shards >= 1 and 1 <= --shard-id <= --num-shards")
     return args
 
 
@@ -343,13 +363,26 @@ def main(argv=None):
         raise ValueError(f"Input directory not found: {directory}")
     if output_dir.exists() and not output_dir.is_dir():
         raise ValueError(f"Output path is not a directory: {output_dir}")
-    samples = discover_samples(directory, args.max_samples)
+    all_samples = discover_samples(directory, 0)
+    samples = select_shard(all_samples, args.num_shards, args.shard_id)
+    if args.max_samples:
+        samples = samples[:args.max_samples]
+    if args.num_shards > 1:
+        print(f"Shard {args.shard_id}/{args.num_shards}: {len(samples):,} chip/month samples "
+              f"from {len(all_samples):,} total (sample limit applies within this shard)", flush=True)
     manifest = make_manifest(checkpoint, directory)
     validate_manifest(output_dir, manifest, args.allow_source_relocation)
     existing = existing_sample_ids(output_dir) if not args.overwrite else set()
+    resume_dir = args.resume_dir.resolve() if args.resume_dir is not None else None
+    external = set()
+    if resume_dir is not None and resume_dir != output_dir:
+        validate_manifest(resume_dir, manifest, args.allow_source_relocation)
+        if not args.overwrite:
+            external = existing_sample_ids(resume_dir)
     pending = samples if args.overwrite else [
         sample for sample in tqdm(samples, desc="Checking outputs")
-        if sample[0] not in existing or not valid_sample(output_dir, sample[0])
+        if not ((sample[0] in existing and valid_sample(output_dir, sample[0]))
+                or (sample[0] in external and valid_sample(resume_dir, sample[0])))
     ]
     if args.skip_disk_space_check:
         required, free = len(pending) * allocated_sample_bytes(1), None
@@ -362,6 +395,14 @@ def main(argv=None):
     else:
         print(f"Required {required/2**30:.2f} GiB; available {free/2**30:.2f} GiB", flush=True)
     if not pending:
+        if resume_dir is not None:
+            # Leave a compatible, empty local shard for the merge command even
+            # when every selected sample was already published to Drive.
+            for scale in SCALES:
+                (output_dir / scale).mkdir(parents=True, exist_ok=True)
+            atomic_write(output_dir / "manifest.json", lambda handle: handle.write(
+                (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
+            ))
         print("All selected samples are complete.", flush=True)
         return
     device = torch.device(args.device)

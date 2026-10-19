@@ -155,6 +155,60 @@ tensor reads. The five resolution folders and per-chip/month filenames are
 unchanged. Large numbers of Drive files can still make scanning and extraction
 slow; this branch does not copy the dataset to the temporary Colab disk.
 
+#### Three-shard Colab staging and merge
+
+Use `NUM_SHARDS=3` and `SHARD_ID=1`, `2`, or `3`. Sharding is deterministic
+over sorted chip IDs, keeps all months of a chip together, and happens before
+the per-shard `MAX_SAMPLES` limit. Existing outputs never change membership.
+The full 8,689-chip input produces:
+
+| Shard | Chips | Chip/month samples | Approximate NPY contents |
+| --- | ---: | ---: | ---: |
+| 1 | 2,897 | 34,764 | 127.3 GiB |
+| 2 | 2,896 | 34,752 | 127.3 GiB |
+| 3 | 2,896 | 34,752 | 127.3 GiB |
+
+No shard number is added to the cache manifest or resolution directories, so
+all shards merge into the same standard `extracted_features` directory. The
+default `NUM_SHARDS=1` retains the original unsharded behavior.
+
+After mounting Drive and installing the Colab requirements, run this cell for
+shard 1, then change only `SHARD_ID` to 2 and 3. It stages one shard on the local
+Colab disk, merges it into Drive, and removes each local sample only after all
+five destination files pass header/size and SHA-256 checks:
+
+```bash
+%%bash
+set -euo pipefail
+export NUM_SHARDS=3
+export SHARD_ID=1  # Run again with 2, then 3.
+export MAX_SAMPLES=0
+export BATCH_SIZE=32
+export OUTPUT_DIR="/content/extracted_features_staging"
+export RESUME_DIR="/content/drive/MyDrive/projects/Biomass/Biomassters/extracted_features"
+export SKIP_DISK_SPACE_CHECK=false
+
+bash /content/BiomassEstimation/extract_features.sh
+python /content/BiomassEstimation/src/merge_feature_shard.py \
+  --source-dir "$OUTPUT_DIR" \
+  --output-dir "$RESUME_DIR" \
+  --remove-source
+```
+
+The local free-space check is enforced for each shard. `RESUME_DIR` also skips
+samples already complete in the merged Drive cache, including after a runtime
+reset. A failed merge retains unverified local files; rerun the same cell to
+continue. Interrupted cleanup can also resume. `--remove-source` removes only
+verified local NPY files, retaining the local manifest and resolution folders.
+Omit this option to retain a separate local copy, but clear verified local
+data before extracting another shard if the combined size would exceed disk.
+
+The persistent merged directory is on Drive and still needs approximately
+382 GiB. Three shards do not make the whole cache fit on a 190 GB local disk;
+only one shard resides locally at a time. The shared filename layout remains
+compatible with feature-mode training. For all-three automation, replace the
+single extraction/merge pair with a loop over `SHARD_ID` values `1 2 3`.
+
 #### Local execution
 
 Run this launcher from Git Bash to extract the first 100 chip/month samples

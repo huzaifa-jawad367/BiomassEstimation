@@ -52,6 +52,47 @@ class ExtractionTests(unittest.TestCase):
         ])
         self.assertEqual(len(extraction.discover_samples(self.root, 0)), 3)
 
+    def test_three_shards_are_disjoint_complete_and_keep_all_months_together(self):
+        samples = [(f"chip{chip}_{month:02d}", f"chip{chip}_S1_{month:02d}.tif")
+                   for chip in range(8) for month in range(12)]
+        shards = [extraction.select_shard(samples, 3, i) for i in (1, 2, 3)]
+        self.assertEqual([len(shard) for shard in shards], [36, 36, 24])
+        sets = [{sample_id for sample_id, _ in shard} for shard in shards]
+        self.assertFalse(sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+        self.assertEqual(set.union(*sets), {sample_id for sample_id, _ in samples})
+        for shard in shards:
+            chips = {sample_id.rsplit("_", 1)[0] for sample_id, _ in shard}
+            for chip in chips:
+                self.assertEqual(sum(sample_id.startswith(chip + "_") for sample_id, _ in shard), 12)
+        self.assertEqual(extraction.select_shard(samples), samples)
+
+    def test_shard_selection_is_independent_of_existing_outputs_and_sample_limit(self):
+        samples = [(f"chip{chip}_00", f"chip{chip}_S1_00.tif") for chip in range(9)]
+        shard = extraction.select_shard(samples, 3, 2)
+        self.assertEqual([name for name, _ in shard], ["chip3_00", "chip4_00", "chip5_00"])
+        for count, number in ((0, 1), (3, 0), (3, 4), (10, 1)):
+            with self.assertRaises(ValueError):
+                extraction.select_shard(samples, count, number)
+
+    def test_external_resume_skips_merged_samples_and_leaves_mergeable_local_manifest(self):
+        checkpoint = self.root / "checkpoint.pth"
+        checkpoint.touch()
+        source = self.root / "input"
+        source.mkdir()
+        (source / "chip_S1_00.tif").touch()
+        local, remote = self.root / "local", self.root / "drive"
+        manifest = extraction.make_manifest(checkpoint.resolve(), source.resolve())
+        for scale, shape in extraction.SCALES.items():
+            (remote / scale).mkdir(parents=True)
+            np.save(remote / scale / "chip_00.npy", np.zeros(shape, dtype=np.float32))
+        (remote / "manifest.json").write_text(json.dumps(manifest))
+        with patch.object(extraction, "load_encoder", side_effect=AssertionError("No GPU work should run")), \
+                patch("builtins.print"):
+            extraction.main(["--checkpoint", str(checkpoint), "--train-features-dir", str(source),
+                             "--output-dir", str(local), "--resume-dir", str(remote)])
+        self.assertTrue((local / "manifest.json").is_file())
+        self.assertFalse(list(local.rglob("*.npy")))
+
     def test_saved_arrays_are_numeric_and_incomplete_sample_is_repaired(self):
         features = [np.zeros(shape, dtype=np.float32) for shape in extraction.SCALES.values()]
         for scale in extraction.SCALES:

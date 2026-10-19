@@ -11,6 +11,9 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 DEVICE="${DEVICE:-cuda}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}" # 0 extracts all samples.
+NUM_SHARDS="${NUM_SHARDS:-1}" # Use 3 for the staged Colab workflow.
+SHARD_ID="${SHARD_ID:-1}" # One-based: 1, 2, or 3.
+RESUME_DIR="${RESUME_DIR:-}" # Optional merged cache to skip already published samples.
 OVERWRITE="${OVERWRITE:-false}" # true recomputes selected samples.
 ALLOW_SOURCE_RELOCATION="${ALLOW_SOURCE_RELOCATION:-true}" # Same TIFFs, different machine/path.
 # Drive's mounted free-space report is not a reliable Google account quota check.
@@ -42,7 +45,12 @@ ARGS=(
     --num-workers "$NUM_WORKERS"
     --device "$DEVICE"
     --max-samples "$MAX_SAMPLES"
+    --num-shards "$NUM_SHARDS"
+    --shard-id "$SHARD_ID"
 )
+if [[ -n "$RESUME_DIR" ]]; then
+    ARGS+=(--resume-dir "$RESUME_DIR")
+fi
 add_boolean_flag() {
     local value="${!1}"
     case "${value,,}" in
