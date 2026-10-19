@@ -158,7 +158,7 @@ both inputs and outputs on the temporary Colab disk.
 
 #### Recommended Colab notebook: local inputs and outputs
 
-Upload `Untitled11.ipynb` to Colab and select a GPU runtime. Its configuration
+Upload `Colab_Feature_Extraction.ipynb` to Colab and select a GPU runtime. Its configuration
 cell contains the supplied Drive paths, checkpoint, six-shard split, batch size,
 worker counts, sample limit, and local disk reserve. It fetches this branch and
 installs `requirements-colab.txt`. Run the three phase cells for each shard:
