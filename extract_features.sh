@@ -7,11 +7,12 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # For Colab/WSL, replace the E:/ paths with your mounted Linux dataset paths.
 CHECKPOINT="${CHECKPOINT:-$ROOT/models/tf_efficientnetv2_l_in21k_f0_b8x2_e100_nrmse_devscse_attnlin_augs_decplus7_plus800eb_200ft/modelo_best.pth}"
 TRAIN_FEATURES_DIR="${TRAIN_FEATURES_DIR:-E:/Datasets/Biomassters/train_features/Volumes/Samsung_T5/BIOMASS/BioMasster_Dataset/v1/DrivenData/train_features}"
-OUTPUT_DIR="${OUTPUT_DIR:-E:/Datasets/Biomassters/extracted_features}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
+# Resume into the extracted_features directory beside this repository.
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/../extracted_features}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 DEVICE="${DEVICE:-cuda}"
-MAX_SAMPLES="${MAX_SAMPLES:-1000}" # 0 extracts all samples.
+MAX_SAMPLES="${MAX_SAMPLES:-0}" # 0 extracts all samples.
 OVERWRITE="${OVERWRITE:-false}" # true recomputes selected samples.
 PYTHON="${PYTHON:-}" # Empty selects a local .venv or system python3.
 

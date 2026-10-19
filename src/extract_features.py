@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import importlib
+import io as bytes_io
 import json
 import os
 from pathlib import Path
@@ -206,19 +207,63 @@ def existing_sample_ids(output_dir):
     return complete
 
 
+def allocation_unit_size(directory):
+    """Return filesystem allocation granularity, including exFAT cluster sizes."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        volume_path = ctypes.create_unicode_buffer(32768)
+        get_volume = kernel.GetVolumePathNameW
+        get_volume.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+        get_volume.restype = wintypes.BOOL
+        if not get_volume(str(directory), volume_path, len(volume_path)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        get_space = kernel.GetDiskFreeSpaceW
+        get_space.argtypes = (wintypes.LPCWSTR,) + (ctypes.POINTER(wintypes.DWORD),) * 4
+        get_space.restype = wintypes.BOOL
+        values = [wintypes.DWORD() for _ in range(4)]
+        if not get_space(volume_path.value, *(ctypes.byref(value) for value in values)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return values[0].value * values[1].value
+    info = os.statvfs(directory)
+    return info.f_frsize or info.f_bsize
+
+
+def allocated_sample_bytes(allocation_unit):
+    if allocation_unit < 1:
+        raise ValueError("Filesystem allocation unit must be positive")
+    total = 0
+    for shape in SCALES.values():
+        header = bytes_io.BytesIO()
+        np.lib.format.write_array_header_1_0(header, {
+            "descr": np.lib.format.dtype_to_descr(np.dtype(np.float32)),
+            "fortran_order": False, "shape": shape,
+        })
+        file_bytes = int(np.prod(shape)) * 4 + header.tell()
+        total += ((file_bytes + allocation_unit - 1) // allocation_unit) * allocation_unit
+    return total
+
+
 def check_disk_space(output_dir, sample_count):
     existing_parent = output_dir
     while not existing_parent.exists():
         existing_parent = existing_parent.parent
     free = shutil.disk_usage(existing_parent).free
-    # Include NPY headers, a temporary file, and a small filesystem margin.
-    required = sample_count * (SAMPLE_BYTES + 5 * 512)
+    allocation_unit = allocation_unit_size(existing_parent)
+    # Round EACH file to full clusters: a 128-byte header can add a whole cluster.
+    per_sample = allocated_sample_bytes(allocation_unit)
+    required = sample_count * per_sample
+    # Include directory metadata and the atomic-write temporary file.
     if sample_count:
         required += 64 * 1024 * 1024
     if free < required:
         raise ValueError(
             f"Insufficient disk space: {sample_count:,} remaining samples need "
             f"{required / 2**30:.2f} GiB; {free / 2**30:.2f} GiB available. "
+            f"Allocation unit: {allocation_unit:,} bytes; "
+            f"each sample occupies {per_sample / 2**20:.2f} MiB on disk. "
             "Reduce --max-samples or choose another --output-dir."
         )
     return required, free

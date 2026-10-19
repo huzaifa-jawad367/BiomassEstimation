@@ -161,7 +161,12 @@ Keep the input TIFFs unchanged when resuming into an existing output directory.
 The 100-sample test writes 500 arrays totaling about 375 MiB. The full 104,268
 samples require about 382 GiB, plus file overhead. Free disk space is checked
 before inference; the full run requires more space than the current E: drive
-has available.
+has available. The disk-space check rounds each NPY file, including its header,
+to the output filesystem's allocation unit. For example, an exFAT drive with
+1 MiB clusters uses 8 MiB per chip/month (about 815 GiB for the full dataset),
+despite only 3.75 MiB of tensor data. A filesystem with 4 KiB allocation units
+uses about 384 GiB plus metadata. Free space can also change during extraction
+if other processes write to the same drive.
 
 ### Training
 

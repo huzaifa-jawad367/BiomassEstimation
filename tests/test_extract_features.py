@@ -100,6 +100,22 @@ class ExtractionTests(unittest.TestCase):
             extraction.check_disk_space(self.root / "new", 100)
         self.assertFalse((self.root / "new").exists())
 
+    def test_large_exfat_clusters_include_npy_header_rounding(self):
+        # Two maps are exact MiB multiples before their headers. They need an
+        # additional cluster, giving 3+2+1+1+1 MiB rather than 3.75 MiB per sample.
+        self.assertEqual(extraction.allocated_sample_bytes(2**20), 8 * 2**20)
+        self.assertEqual(extraction.allocated_sample_bytes(4096), extraction.SAMPLE_BYTES + 5 * 4096)
+        with patch.object(extraction, "allocation_unit_size", return_value=2**20), \
+                patch.object(extraction.shutil, "disk_usage", return_value=SimpleNamespace(free=int(381.43 * 2**30))):
+            with self.assertRaisesRegex(ValueError, "802.32 GiB.*8.00 MiB"):
+                extraction.check_disk_space(self.root, 102689)
+
+    def test_zero_pending_samples_need_no_extra_space(self):
+        with patch.object(extraction, "allocation_unit_size", return_value=2**20), \
+                patch.object(extraction.shutil, "disk_usage", return_value=SimpleNamespace(free=0)):
+            required, free = extraction.check_disk_space(self.root, 0)
+        self.assertEqual((required, free), (0, 0))
+
     def test_atomic_write_preserves_previous_file_on_failure(self):
         path = self.root / "output.npy"
         path.write_bytes(b"previous")
