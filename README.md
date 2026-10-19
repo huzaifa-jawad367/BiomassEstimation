@@ -153,9 +153,44 @@ extraction; already completed samples can be skipped on the next run.
 Resume reads only NPY headers and file sizes, with no memory mapping or full
 tensor reads. The five resolution folders and per-chip/month filenames are
 unchanged. Large numbers of Drive files can still make scanning and extraction
-slow; this branch does not copy the dataset to the temporary Colab disk.
+slow when extracting directly from Drive. Use the workflow below to stage
+both inputs and outputs on the temporary Colab disk.
 
-#### Three-shard Colab staging and merge
+#### Recommended Colab notebook: local inputs and outputs
+
+Upload `Untitled11.ipynb` to Colab and select a GPU runtime. Its configuration
+cell contains the supplied Drive paths, checkpoint, six-shard split, batch size,
+worker counts, sample limit, and local disk reserve. It fetches this branch and
+installs `requirements-colab.txt`. Run the three phase cells for each shard:
+
+1. **Prepare** copies only pending chip/month S1 TIFFs and matching S2 TIFFs
+   into `/content/biomass_feature_work/shard_001_of_006/train_features`.
+   Missing S2 remains absent and uses the extractor's zero filling. Copies
+   are atomic and checked with SHA-256. The preflight includes raw TIFFs,
+   five-resolution outputs, and an 8 GiB reserve; it stops before copying
+   if they do not fit.
+2. **Extract** reads those local TIFFs and writes local NPY files. The GPU
+   extraction loop does not read inputs or write outputs through Drive.
+3. **Merge** publishes to the single configured Drive `extracted_features`
+   directory, verifies copied arrays, and clears verified local TIFF/NPY
+   copies. The original Drive TIFFs remain available.
+
+Change `SHARD_ID` from 1 through 6, rerunning the configuration and phase cells.
+Alternatively enable `RUN_ALL_REMAINING` in the final cell to process them
+sequentially. A failed phase stops the loop. Rerun prepare after an interrupted
+copy, extract after interrupted extraction, or merge after interrupted upload.
+Already complete samples in Drive are skipped during preparation. Keep
+`NUM_SHARDS` stable while resuming; use a new work directory if changing it.
+An already selected local shard is never partitioned a second time.
+
+The same phases are available directly through
+`python src/colab_feature_workflow.py prepare|extract|merge --help`.
+The notebook invokes this repository code for staging and merging. Drive
+still supplies the initial TIFF copy and receives the final upload; these
+transfers happen outside the GPU extraction phase. The full merged cache
+still requires approximately 382 GiB of Drive storage.
+
+#### Alternative: three shards with Drive input reads
 
 Use `NUM_SHARDS=3` and `SHARD_ID=1`, `2`, or `3`. Sharding is deterministic
 over sorted chip IDs, keeps all months of a chip together, and happens before
