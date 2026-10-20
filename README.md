@@ -161,7 +161,15 @@ both inputs and outputs on the temporary Colab disk.
 Upload `Colab_Feature_Extraction.ipynb` to Colab and select a GPU runtime. Its configuration
 cell contains the supplied Drive paths, checkpoint, six-shard split, batch size,
 worker counts, sample limit, and local disk reserve. It fetches this branch and
-installs `requirements-colab.txt`. Run the three phase cells for each shard:
+installs `requirements-colab.txt`. A restoration cell first combines the split
+`train_features.z01` ... `train_features.zip` archive locally with Info-ZIP,
+then restores TIFFs directly to the configured Drive input directory. It
+checks archive inventory (104,268 S1 samples), verifies existing TIFF CRCs,
+repairs missing/corrupt files, and clears the temporary combined ZIP. The
+original archive parts are retained. Use a fresh staging work directory after
+restoring an incomplete inventory because shard membership may change. Features
+previously computed without their archived S2 inputs need recomputation.
+Run the three phase cells for each shard:
 
 1. **Prepare** copies only pending chip/month S1 TIFFs and matching S2 TIFFs
    into `/content/biomass_feature_work/shard_001_of_006/train_features`.
